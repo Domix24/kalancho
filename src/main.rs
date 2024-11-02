@@ -3,25 +3,34 @@
 use reqwest::Client;
 use std::error::Error;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
+use std::env;
 
+// Number of worker tasks (threads) to spawn
 const NUM_WORKERS: usize = 40 * 40;
+// Default length of the words to generate if not provided in the command line arguments
 const DEFAULT_WORD_LENGTH: usize = 2;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let wordLength = std::env::args().nth(1).map(|arg| arg.parse().unwrap_or(DEFAULT_WORD_LENGTH)).unwrap_or(DEFAULT_WORD_LENGTH);
+    // Read the word length from the comamnd line arguments or use the default value
+    let wordLength = env::args()
+        .nth(1)
+        .map(|arg| arg.parse().unwrap_or(DEFAULT_WORD_LENGTH))
+        .unwrap_or(DEFAULT_WORD_LENGTH);
 
     let client = Client::new();
+    // Generate all combination of the specified word length
     let logins: Vec<String> = generateAllCombinations(wordLength);
 
     let (tx, rx) = mpsc::channel::<Option<String>>(100);
     let rx = Arc::new(Mutex::new(rx));
     let mut handles = Vec::new();
 
+    // Open the file for writing valid logins
     let file = Arc::new(Mutex::new(OpenOptions::new()
         .create(true)
         .append(true)
@@ -29,6 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let validLogins = Arc::new(Mutex::new(Vec::new()));
 
+    // Spawn worker tasks
     for _ in 0..NUM_WORKERS {
         let client = client.clone();
         let rx = Arc::clone(&rx);
@@ -38,18 +48,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         handles.push(task::spawn(workerTask(client, rx, file, validLogins)));
     }
 
+    // Send logins to worker tasks
     for login in logins {
         tx.send(Some(login)).await.expect("Failed to send login");
     }
 
+    // Send termination signals to worker tasks
     for _ in 0..NUM_WORKERS {
         tx.send(None).await.expect("Failed to send termination signal");
     }
 
+    // Await all worker tasks to complete
     for handle in handles {
         handle.await.expect("Task failed");
     }
 
+    // Print the results
     let validLogins = validLogins.lock().await;
     println!();
     println!("Number of valid logins: {}", validLogins.len());
@@ -60,6 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// Worker task function
 async fn workerTask(client: Client, rx: Arc<Mutex<mpsc::Receiver<Option<String>>>>, file: Arc<Mutex<std::fs::File>>, validLogins: Arc<Mutex<Vec<String>>>) {
     while let Some(login) = receiveLogin(&rx).await {
         if let Some(login) = login {
@@ -70,11 +85,13 @@ async fn workerTask(client: Client, rx: Arc<Mutex<mpsc::Receiver<Option<String>>
     }
 }
 
+// Receive a login from the channel
 async fn receiveLogin(rx: &Arc<Mutex<mpsc::Receiver<Option<String>>>>) -> Option<Option<String>> {
     let mut rx = rx.lock().await;
     rx.recv().await
 }
 
+// Handle processing of each login
 async fn handleLogin(client: &Client, login: &str, file: &Arc<Mutex<std::fs::File>>, validLogins: &Arc<Mutex<Vec<String>>>) {
     if processLogin(client, login).await {
         let mut file = file.lock().await;
@@ -84,13 +101,14 @@ async fn handleLogin(client: &Client, login: &str, file: &Arc<Mutex<std::fs::Fil
         validLogins.push(login.to_string());
 
         print!("+");
-        std::io::stdout().flush().expect("Failed to flush stdout");
+        io::stdout().flush().expect("Failed to flush stdout");
     } else {
         print!(".");
-        std::io::stdout().flush().expect("Failed to flush stdout");
+        io::stdout().flush().expect("Failed to flush stdout");
     }
 }
 
+// Process each login by sending a request to the Twitch API
 async fn processLogin(client: &Client, login: &str) -> bool {
     let response = client.get(format!("https://passport.twitch.tv/usernames/{}", login))
         .send()
@@ -100,6 +118,7 @@ async fn processLogin(client: &Client, login: &str) -> bool {
     response.status().is_success() && response.status().as_u16() == 204
 }
 
+// Generate all combinations of the specified length
 fn generateAllCombinations(length: usize) -> Vec<String> {
     let mut allCombinations = Vec::new();
     let alphabet = "abcdefghijklmnopqrstuvwxyz".chars().collect::<Vec<_>>();
